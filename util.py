@@ -1,5 +1,5 @@
 """
-Utility classes and functions.
+Utility classes and functions
 """
 import math
 import matplotlib.pyplot as plt

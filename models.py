@@ -1,5 +1,5 @@
 """
-Top-level model classes.
+Top-level model classes
 """
 
 import torch
