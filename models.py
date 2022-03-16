@@ -34,8 +34,8 @@ class RUBertForQA(nn.Module):
         logit_start = self.fc_start(self.dropout(embedded))
         logit_end = self.fc_end(self.dropout(embedded))
         # logit_start, logit_end = [batch size, sent len]
-        logit_start = logit_start.permute(1, 0, 2).squeeze()
-        logit_end = logit_end.permute(1, 0, 2).squeeze()
+        logit_start = logit_start.permute(1, 0, 2).squeeze(-1)
+        logit_end = logit_end.permute(1, 0, 2).squeeze(-1)
 
         # log_probs_start, log_probs_end = [batch size, sent len]
         log_probs_start = F.log_softmax(logit_start, -1)
