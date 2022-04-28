@@ -16,7 +16,9 @@ import ujson as json
 
 from collections import Counter
 from IPython.display import clear_output
+from itertools import repeat
 from tensorboardX import SummaryWriter
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModel
 
 
@@ -143,7 +145,9 @@ def discretize(p_start, p_end, max_len=15, no_answer=False):
             Shape (batch_size,)
         end_idxs (torch.Tensor): Hard predictions for end index.
             Shape (batch_size,)
-
+        p - max of joint probability
+            Shape (batch_size,)
+        
     """
 
     if p_start.min() < 0 or p_start.max() > 1 \
@@ -154,6 +158,7 @@ def discretize(p_start, p_end, max_len=15, no_answer=False):
     p_start = p_start.unsqueeze(dim=2)
     p_end = p_end.unsqueeze(dim=1)
     p_joint = torch.matmul(p_start, p_end)  # (batch_size, c_len, c_len)
+    #print(p_joint)
 
     # Restrict to pairs (i, j) such that i <= j <= i + max_len - 1
     c_len, device = p_start.size(1), p_start.device
@@ -171,9 +176,12 @@ def discretize(p_start, p_end, max_len=15, no_answer=False):
 
     # Take pair (i, j) that maximizes p_joint
     max_in_row, _ = torch.max(p_joint, dim=2)
+    #print(max_in_row)
     max_in_col, _ = torch.max(p_joint, dim=1)
+    #print(max_in_col)
     start_idxs = torch.argmax(max_in_row, dim=-1)
     end_idxs = torch.argmax(max_in_col, dim=-1)
+    p_joint_max = torch.amax(p_joint, dim=(1,2)).cpu().numpy()
 
     if no_answer:
         # Predict no-answer whenever p_no_answer > max_prob
@@ -183,7 +191,7 @@ def discretize(p_start, p_end, max_len=15, no_answer=False):
 
     start_idxs = start_idxs.detach().cpu().numpy()
     end_idxs = end_idxs.detach().cpu().numpy()
-    return start_idxs, end_idxs
+    return start_idxs, end_idxs, p_joint_max
 
 
 def metric_max_over_ground_truths(metric_fn, prediction, ground_truth):
@@ -226,8 +234,10 @@ def eval_dicts(answers, pred_dict, no_answer):
 
     if no_answer:
         eval_dict['AvNA'] = 100. * avna / total
+    
+    result = {'F1': eval_dict['F1'], 'EM': eval_dict['EM']}
 
-    return eval_dict
+    return result
 
 
 def read_squad(path):
@@ -283,6 +293,67 @@ def read_squad(path):
                     answers_dict[int(qa['id'])] = answer
 
     return contexts_dict, questions_dict, answers_dict
+
+
+def read_squad_open_domain(path):
+
+    """
+
+    Credits: Fine-Tuning With SQuAD 2.0
+    https://gist.github.com/jamescalam/55daf50c8da9eb3a7c18de058bc139a3
+    with some changes
+
+    Read file with SberQuad data and construct dictionaries in appropriate format
+
+    Args:
+        path (string): path to file with data.
+
+    Returns:
+        contexts_dict (dict): dictionary with context examples in format {context id: context}
+        questions_dict (dict): dictionary with question examples in format {question id: question}
+        answers_dict (dict): dictionary with answer examples in format
+        {question id: {text: answer text,
+                       answer_start: index number of character in context where answer starts }}
+        question_context_dict (dict): dictionary with native contexts to each question in format 
+        {question id: context id}
+
+    """
+
+    with open(path, 'rb') as f:
+        squad_dict = json.load(f)
+
+    contexts_dict = {}
+    answers_dict = {}
+    questions_dict = {}
+    question_context_dict = {}
+
+    # iterate through all data in squad data
+    for group in squad_dict['data']:
+        for passage in group['paragraphs']:
+            context = passage['context']
+            context_id = int(passage['id'])
+            contexts_dict[context_id] = context
+            for qa in passage['qas']:
+                question = qa['question']
+                question_id = int(qa['id'])
+                if 'plausible_answers' in qa.keys():
+                    access = 'plausible_answers'
+                else:
+                    access = 'answers'
+                for answer in qa['answers']:
+                    # if answer starts with a wight space, remove it
+                    # and correct field 'answer_start'
+                    if answer['text'][0] == " ":
+                        cut_string = answer['text'].lstrip()
+                        cut_characters_number = len(answer['text']) - len(cut_string)
+                        answer['text'] = cut_string
+                        answer['answer_start'] += cut_characters_number
+                    # append data to dicts
+                    questions_dict[question_id] = question
+                    answers_dict[question_id] = answer
+                    question_context_dict[question_id] = context_id
+
+    return contexts_dict, questions_dict, answers_dict, question_context_dict
 
 
 def add_end_idx(answers, contexts):
@@ -522,6 +593,126 @@ def evaluate(model, iterator, criterion, compute_metrics=False, max_ans_len=100,
 
     return nll_meter.avg
 
+
+def retriever_accuracy(similarity, query_id, doc_id, question_context, n):
+
+    """
+
+    Compute accuracy for retriever model
+
+    Args:
+        similarity (ndarray): matrix  of similarity measure between queries and documents.
+        Shape [number of documents, number of queries]
+        query_id (list): query ids. Lenght [number of queries]
+        doc_id (list): document ids. Lenght [number of documents]
+        question_context (dict): a dict with native document id for each query id.
+        Format {query_id: doc_id}. Lenght [number of queries]
+        n: number of retrieved documents for each query
+
+    Returns:
+        ratio of queries with correctly found document ids to total number of queries
+
+    """
+
+    # return document indexes with top-n similatiry measure
+    retrieved_doc_index = np.argpartition(similarity, -n, axis=0)[-n:].T
+    # compute number of errors: if native document id isn't in retrieved document_id list
+    err = 0
+    for question_id, doc_index in zip(query_id, retrieved_doc_index):
+        native_doc_id = question_context[question_id]
+        retrieved_doc_id = np.array(doc_id)[doc_index] # tranform doc indexes into ids
+        if native_doc_id not in retrieved_doc_id:
+            err +=1
+    return 1 - err / retrieved_doc_index.shape[0]
+
+
+def get_answer(model, query, query_id, doc, doc_id, tokenizer, batch_size, weights=None, max_lenght=512):
+
+    """
+
+    Get predicted answer to a query based on reader model
+
+    Args:
+        model: reader model instance
+        query (list): Input strings. Lenght [number of queries]
+        query_id (list): query ids. Lenght [number of queries]
+        doc (list): Input strings. Lenght [number of retrieved documents for all queries]
+        doc_id (list): document ids. Lenght [number of retrieved documents for all queries]
+        tokenizer: tokenizer instance for reader model
+        batch_size (int): number of examples in a batch during reader model inference stage
+        weights (ndarray): coefficients to correct probability of correct answer given by reader model.
+        Shape [number of queries, number of retrieved documents for each query]
+        max_lenght: number of tokens in encoded sequence
+
+    Returns:
+        pred_answers (dict): a dict with text answers
+        in format {query_id: answer text}. Lenght [number of queries]
+        selected_doc_id (list): a list with finally selected document ids for each query.
+        Lenght [number of queries]
+
+    """
+
+    # compute number of docs retrieved for each query
+    n = len(doc) // len(query)
+    # if weights aren't given consider they equal to 1
+    if type(weights) != np.ndarray:
+        weights = np.ones((len(query), n))
+    # expand queries to satisfy dimension.
+    # Query list has lenght [number of questions],
+    # but doc list lenght is [number of retrieved documents for all queries],
+    # i.e. [number of questions * n], n is number of docs retrieved for each query.
+    # so we need to duplicate each query n times
+    query_for_reader = [x for item in query for x in repeat(item, n)]
+    doc_for_reader = doc
+    doc_id_for_reader = doc_id
+    # tokenize data for reader model and create loader data object
+    encodings = (tokenizer(doc_for_reader, query_for_reader,
+                             truncation=True, padding=True, max_length = max_lenght, return_tensors = 'pt'))
+    dataset = SquadDataset(encodings)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    # go to inference
+    model.eval()
+    with torch.no_grad():
+        pred_token_start = np.empty(0, dtype=int)
+        pred_token_end = np.empty(0, dtype=int)
+        p_joint = np.empty(0, dtype=int)
+        for batch in tqdm.tqdm(loader):
+            input_ids = batch['input_ids'].cuda()
+            # get predictions
+            logp_start, logp_end = model(input_ids)
+            p_start, p_end = logp_start.exp(), logp_end.exp()
+            # get start and end indices based on predictions
+            # and joint probability that start and end predictions are correct
+            pred_token_start_batch, pred_token_end_batch, p_joint_batch = discretize(p_start, p_end, 100, False)
+            pred_token_start = np.concatenate((pred_token_start, pred_token_start_batch), axis=None)
+            pred_token_end = np.concatenate((pred_token_end, pred_token_end_batch), axis=None)
+            p_joint = np.concatenate((p_joint, p_joint_batch), axis=None)
+        pred_answers = {}
+        # p_joint has shape [total number of docs].
+        # Transform it in more convenient way: [number of queries, n].
+        # Each row in this matrix matches a query.
+        # Each value in a row is a model confidence to predict correct start/end of the answer
+        # for each of n retrieved documents (in columns)
+        model_answer_probability = np.reshape(p_joint, (-1, n))
+        # correct model probability with given weights
+        final_answer_probability = model_answer_probability * weights
+        # For each row select index of the document with the highest probability.
+        # Shape [number of queries, n]
+        selected_doc_index_by_query = np.argmax(final_answer_probability, axis=1)
+        # transform selected doc_id indices in the matrix to
+        # indices in original list doc_id
+        shift_by_query = np.arange(len(query), dtype=np.int32) * n
+        selected_doc_index = selected_doc_index_by_query + shift_by_query
+        # finally get doc_id from doc_id index
+        selected_doc_id = np.array(doc_id_for_reader)[selected_doc_index]
+        # look for a text answer for each question based on selected doc_id and predicted start/end of the answer
+        for question_id, doc_index in zip(query_id, selected_doc_index):
+            char_answer_start = encodings.token_to_chars(doc_index, pred_token_start[doc_index]).start
+            char_answer_end = encodings.token_to_chars(doc_index, pred_token_end[doc_index]).end
+            # predicted answer is a substring of a document between start and end characters
+            pred_answers[question_id] = doc_for_reader[doc_index][char_answer_start:char_answer_end]
+        return pred_answers, selected_doc_id 
+    
 
 def epoch_time(start_time, end_time):
 
