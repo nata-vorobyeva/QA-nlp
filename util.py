@@ -76,7 +76,7 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
-def visualize(tbx, pred_dict, answers, contexts, questions, step, split, num_visuals):
+def visualize(tbx, preds, answers, contexts, questions, question_context, step, split, num_visuals):
 
     """
 
@@ -87,8 +87,15 @@ def visualize(tbx, pred_dict, answers, contexts, questions, step, split, num_vis
     with some changes
     Args:
         tbx (tensorboardX.SummaryWriter): Summary writer.
-        pred_dict (dict): dict of predictions of the form id -> pred.
-        eval_path (str): Path to eval JSON file.
+        preds (dict): dict of predicted answers in format question id: text.
+        answers (dict): dictionary with answer examples in format
+        {question id: {text: answer text,
+                       answer_start: index number of character in context where answer starts,
+                        context_id: native context id}}
+        contexts (dict): dictionary with context examples in format {question id: context}
+        questions: (dict): dictionary with question examples in format {question id: question}
+        question_context (dict): dictionary with native contexts to each question in format
+        {question id: context id}
         step (int): Number of examples seen so far during training.
         split (str): Name of data split being visualized.
         num_visuals (int): Number of visuals to select at random from preds.
@@ -97,15 +104,20 @@ def visualize(tbx, pred_dict, answers, contexts, questions, step, split, num_vis
 
     if num_visuals <= 0:
         return
-    if num_visuals > len(pred_dict):
-        num_visuals = len(pred_dict)
+    if num_visuals > len(preds):
+        num_visuals = len(preds)
 
-    visual_ids = np.random.choice(list(pred_dict), size=num_visuals, replace=False)
+    visual_ids = np.random.choice(list(preds), size=num_visuals, replace=False)
 
     for i, id_ in enumerate(visual_ids):
-        pred = pred_dict[id_] or 'N/A'
+        # pred = pred_dict[id_] or 'N/A'
+        # question = questions[id_]
+        # context = contexts[id_]
+        # answer = answers[id_]['text']
+        pred = preds[id_]
         question = questions[id_]
-        context = contexts[id_]
+        context_id = question_context[id_]
+        context = contexts[context_id]
         answer = answers[id_]['text']
 
         tbl_fmt = (f'- **Question:** {question}\n'
@@ -158,7 +170,6 @@ def discretize(p_start, p_end, max_len=15, no_answer=False):
     p_start = p_start.unsqueeze(dim=2)
     p_end = p_end.unsqueeze(dim=1)
     p_joint = torch.matmul(p_start, p_end)  # (batch_size, c_len, c_len)
-    #print(p_joint)
 
     # Restrict to pairs (i, j) such that i <= j <= i + max_len - 1
     c_len, device = p_start.size(1), p_start.device
@@ -254,66 +265,12 @@ def read_squad(path):
         path (string): path to file with data.
 
     Returns:
-        contexts_dict (dict): dictionary with context examples in format {question id: context}
-        questions_dict (dict): dictionary with question examples in format {question id: question}
-        answers_dict (dict): dictionary with answer examples in format
-        {question id: {text: answer text,
-                       answer_start: index number of character in context where answer starts }}
-
-    """
-
-    with open(path, 'rb') as f:
-        squad_dict = json.load(f)
-
-    contexts_dict = {}
-    answers_dict = {}
-    questions_dict = {}
-
-    # iterate through all data in squad data
-    for group in squad_dict['data']:
-        for passage in group['paragraphs']:
-            context = passage['context']
-            for qa in passage['qas']:
-                question = qa['question']
-                if 'plausible_answers' in qa.keys():
-                    access = 'plausible_answers'
-                else:
-                    access = 'answers'
-                for answer in qa['answers']:
-                    # if answer start with wight space, remove it
-                    # and correct field 'answer_start'
-                    if answer['text'][0] == " ":
-                        cut_string = answer['text'].lstrip()
-                        cut_characters_number = len(answer['text']) - len(cut_string)
-                        answer['text'] = cut_string
-                        answer['answer_start'] += cut_characters_number
-                    # append data to dicts
-                    contexts_dict[int(qa['id'])] = context
-                    questions_dict[int(qa['id'])] = question
-                    answers_dict[int(qa['id'])] = answer
-
-    return contexts_dict, questions_dict, answers_dict
-
-
-def read_squad_open_domain(path):
-
-    """
-
-    Credits: Fine-Tuning With SQuAD 2.0
-    https://gist.github.com/jamescalam/55daf50c8da9eb3a7c18de058bc139a3
-    with some changes
-
-    Read file with SberQuad data and construct dictionaries in appropriate format
-
-    Args:
-        path (string): path to file with data.
-
-    Returns:
         contexts_dict (dict): dictionary with context examples in format {context id: context}
         questions_dict (dict): dictionary with question examples in format {question id: question}
         answers_dict (dict): dictionary with answer examples in format
         {question id: {text: answer text,
-                       answer_start: index number of character in context where answer starts }}
+                       answer_start: index number of character in context where answer starts,
+                        context_id: native context id}}
         question_context_dict (dict): dictionary with native contexts to each question in format 
         {question id: context id}
 
@@ -349,12 +306,65 @@ def read_squad_open_domain(path):
                         answer['text'] = cut_string
                         answer['answer_start'] += cut_characters_number
                     # append data to dicts
+                    answer['context_id'] = context_id
                     questions_dict[question_id] = question
                     answers_dict[question_id] = answer
                     question_context_dict[question_id] = context_id
 
     return contexts_dict, questions_dict, answers_dict, question_context_dict
 
+
+def read_lb(path):
+
+    """
+
+    Read file with LB data and construct dictionaries in appropriate format
+
+    Args:
+        path (string): path to file with data.
+
+    Returns:
+        contexts_dict (dict): dictionary with context examples in format {context id: context}
+        questions_dict (dict): dictionary with question examples in format {question id: question}
+        answers_dict (dict): dictionary with answer examples in format
+        {question id: {text: answer text,
+                       answer_start: index number of character in context where answer starts,
+                        context_id: native context id}}
+        question_context_dict (dict): dictionary with native contexts to each question in format
+        {question id: context id}
+
+    """
+
+    with open(path, 'rb') as f:
+        squad_dict = json.load(f)
+
+    contexts_dict = {}
+    answers_dict = {}
+    questions_dict = {}
+    question_context_dict = {}
+
+    for line in squad_dict['data']:
+        answer = {}
+        context = line['text']
+        context_id = int(line['id'])
+        contexts_dict[context_id] = context
+        # print(context_id)
+        if bool(line['question']):
+            question = line['question']
+            question_id = int(line['question_id'])
+            answer['text'] = str(line['answer'])
+            answer['answer_start'] = line['answer_start']
+            answer['context_id'] = context_id
+            if str(line['answer'])[0] == " ":
+                cut_string = line['answer'].lstrip()
+                cut_characters_number = len(line['answer']) - len(cut_string)
+                answer['text'] = cut_string
+                answer['answer_start'] += cut_characters_number
+            questions_dict[question_id] = question
+            answers_dict[question_id] = answer
+            question_context_dict[question_id] = context_id
+
+    return contexts_dict, questions_dict, answers_dict, question_context_dict
 
 def add_end_idx(answers, contexts):
 
@@ -372,17 +382,20 @@ def add_end_idx(answers, contexts):
                         answer_end: index number of character in context where answer ends}}
 
     Args:
-        answers (dict): dictionary with answers examples in format
+        answers (dict): dictionary with answer examples in format
         {question id: {text: answer text,
-                       answer_start: index number of character in context where answer starts}}
+                       answer_start: index number of character in context where answer starts,
+                        context_id: native context id}}
         contexts (dict): dictionary with context examples in format {question id: context}
 
     """
 
     # loop through each answer-context pair
     # for answer, context in zip(answers, contexts):
-    for answer, context in zip(answers.values(), contexts.values()):
+    for key, answer in answers.items():
         # gold_text refers to the answer we are expecting to find in context
+        context_id = answer['context_id']
+        context = contexts[context_id]
         gold_text = answer['text']
         # we already know the start index
         start_idx = answer['answer_start']
@@ -418,9 +431,10 @@ def add_token_positions(encodings, answers, max_length):
 
     Args:
         encodings (BatchEncoding): encodings
-        answers (dict): dictionary with answer examples in format
+        answers_dict (dict): dictionary with answer examples in format
         {question id: {text: answer text,
                        answer_start: index number of character in context where answer starts,
+                       context_id: native context id,
                        answer_end: index number of character in context where answer ends}}
         max_length (int): maximum lenght of encoding sequence
 
@@ -510,88 +524,134 @@ def train(model, iterator, optimizer, criterion, train_history=None, valid_histo
     return epoch_loss / len(iterator)
 
 
-def evaluate(model, iterator, criterion, compute_metrics=False, max_ans_len=100,
-             encodings=None, answers=None, contexts=None, questions=None):
+def get_logits(model, iterator, get_loss=False, criterion=None):
 
     """
 
-    Evaluate model performance
+    Compute predictions (logits) during evaluation stage
 
     Args:
         model (models): model to be evaluated
         iterator (DataLoader): Dataloader with encodings
+        get_loss (bool):
+            False: don't compute loss between predictions and true values
+            True: compute loss between predictions and true values
         criterion (NLLLoss): loss function
-        compute_metrics (bool):
-            False: intermediate evaluation: get predictions, compute loss
-            True: full evaluation: get predictions, compute loss, compute F1/EM metrics,
-                  write to Tensorboard
-        max_ans_len (int): maximum length of the discretized prediction
-        encodings (BatchEncoding): encodings to reconstruct text answer
-        answers (dict): dictionary with answer examples
-        contexts (dict): dictionary with context examples
-        questions (dict): dictionary with question examples
 
     Returns:
-        If compute_metrics = False:
-            nll_meter.avg (float): loss value
-        If compute_metrics = True:
-            results_list (list): list of tuples:
-                ('NLL', loss value)
-                ('F1', F1 value)
-                ('EM', EM value)
+        logp_start (torch.Tensor): predictions (logits) for start index.
+                Shape [iterator lenght, context_len].
+        logp_end (torch.Tensor): predictions (logits) for end index.
+                Shape [iterator lenght, context_len].
+        loss (float): loss value:
+            If get_loss = False:
+                0
+            If get_loss = True:
+                average loss value for all batches
 
     """
 
     model.eval()
+    logp_start = torch.empty(0, dtype=torch.float32)
+    logp_end = torch.empty(0, dtype=torch.float32)
     with torch.no_grad():
-        # create an instance to measure loss
-        nll_meter = AverageMeter()
-        if compute_metrics:
-            pred_answers = {}
-            pred_token_start = np.empty(0, dtype=int)
-            pred_token_end = np.empty(0, dtype=int)
+        if get_loss:
+            # create an instance to measure loss
+            nll_meter = AverageMeter()
         for batch in tqdm.tqdm(iterator):
             input_ids = batch['input_ids'].cuda()
-            logp_start, logp_end = model(input_ids)
-            target_start = batch['start_positions'].cuda()
-            target_end = batch['end_positions'].cuda()
-            loss = criterion(logp_start, target_start) + criterion(logp_end, target_end)
-            nll_meter.update(loss.item(), input_ids.shape[0])
-            if compute_metrics:
-                p_start, p_end = logp_start.exp(), logp_end.exp()
-                # get predicted indexes of start and end tokens for a batch
-                pred_token_start_batch, pred_token_end_batch = (
-                    discretize(p_start, p_end, max_ans_len, False))
-                # add them to the whole dataset
-                pred_token_start = np.concatenate((pred_token_start, pred_token_start_batch), axis=None)
-                pred_token_end = np.concatenate((pred_token_end, pred_token_end_batch), axis=None)
-        if compute_metrics:
-            # get predicted text answer
-            for i, key in enumerate(encodings['ids']):
-                # get from indexes of start and end tokens
-                # indexes of start and end characters in original context
-                char_answer_start = encodings.token_to_chars(i, pred_token_start[i]).start
-                char_answer_end = encodings.token_to_chars(i, pred_token_end[i]).end
-                # predicted answer is a substring of original context between start and and characters
-                pred_answers[key] = list(contexts.values())[i][char_answer_start:char_answer_end]
-            # evaluate model performance, compute loss amf F1/EM metrics
-            results = eval_dicts(answers, pred_answers, False)
-            results_list = [('NLL', nll_meter.avg),
-                            ('F1', results['F1']),
-                            ('EM', results['EM'])]
-            # write random examples of context, question, true and predicted answers to TensorBoard
-            tbx = SummaryWriter('./save/visualize')
-            visualize(tbx,
-                           pred_dict=pred_answers,
-                           answers=answers,
-                           contexts=contexts,
-                           questions=questions,
-                           step=0,
-                           split='dev',
-                           num_visuals=10)
-            return results_list
+            # get predictions for a batch
+            logp_start_batch, logp_end_batch = model(input_ids)
+            # add them to tensor with all predictions for iterator
+            logp_start = torch.cat((logp_start, logp_start_batch.cpu()), 0)
+            logp_end = torch.cat((logp_end, logp_end_batch.cpu()), 0)
+            if get_loss:
+                # compute loss for a batch and update nll_meter
+                target_start = batch['start_positions'].cuda()
+                target_end = batch['end_positions'].cuda()
+                loss = criterion(logp_start_batch, target_start) + criterion(logp_end_batch, target_end)
+                nll_meter.update(loss.item(), input_ids.shape[0])
+        if get_loss:
+            loss = nll_meter.avg
+        else:
+            loss = 0
 
-    return nll_meter.avg
+    return logp_start, logp_end, loss
+
+
+def get_answer(logp_start, logp_end, doc, doc_id, query_id, encoding, weights=None):
+    """
+
+        Get predicted text answer to a query based on reader model predictions
+
+        Args:
+            logp_start (torch.Tensor): predictions (logits) for start index.
+                Shape [number of retrieved documents for all queries, context_len].
+            logp_end (torch.Tensor): predictions (logits) for end index.
+                Shape [number of retrieved documents for all queries, context_len].
+            doc (list): Input strings. Lenght [number of retrieved documents for all queries]
+            doc_id (list): document ids. Lenght [number of retrieved documents for all queries]
+            query_id (list): query ids. Lenght [number of queries]
+            encoding (BatchEncoding): encodings to reconstruct text answer
+            weights (ndarray): coefficients to correct probability of correct answer given by reader model.
+            Shape [number of queries, number of retrieved documents for each query]
+
+        Returns:
+            pred_answers (dict): a dict with text answers
+            in format {query_id: answer text}. Lenght [number of queries]
+            selected_doc_id (list): a list with finally selected document ids for each query.
+            Lenght [number of queries]
+
+        """
+
+    p_start, p_end = logp_start.exp(), logp_end.exp()
+    # get start/end indices based on predictions
+    # and joint probability that start and end predictions are correct
+    pred_token_start, pred_token_end, p_joint = discretize(p_start, p_end, 100, False)
+    pred_answers = {}
+
+    # get number of docs per query
+    n = len(doc) // len(query_id)
+    if n > 1:
+        # if there are more than one docs per query, we deal with open domain QA.
+        # it means that for each query we compute start/end token probability for each doc
+        # and than for each query we select doc index with max joint probability p_joint.
+        # if weights are given, we need to correct model probability with them
+
+        # if weights aren't given consider they equal to 1
+        if type(weights) != np.ndarray:
+            weights = np.ones((len(query_id), n))
+        # p_joint has shape [total number of docs].
+        # Transform it in more convenient way: [number of queries, n].
+        # Each row in this matrix matches a query.
+        # Each value in a row is a model confidence to predict correct start/end of the answer
+        # for each of n retrieved documents (in columns)
+        model_answer_probability = np.reshape(p_joint, (-1, n))
+        # correct model probability with given weights
+        final_answer_probability = model_answer_probability * weights
+        # For each row select index of the document with the highest probability.
+        # Shape [number of queries, n]
+        selected_doc_index_by_query = np.argmax(final_answer_probability, axis=1)
+        # transform selected doc_id indices in the matrix to
+        # indices in original list doc_id
+        shift_by_query = np.arange(len(query_id), dtype=np.int32) * n
+        selected_doc_index = selected_doc_index_by_query + shift_by_query
+        # finally get doc_id from doc_id index
+        selected_doc_id = np.array(doc_id)[selected_doc_index]
+    else:
+        # If n = 1, we don't need to select the most probable document for a query,
+        # because there is just one of them for each query
+        # So generate selected_doc_index as list [0, 1, ...] of lenght [number of docs]
+        # and selected doc_id is equal to input doc_id
+        selected_doc_index = [i for i in range(len(doc_id))]
+        selected_doc_id = doc_id
+    # look for a text answer for each question based on selected doc_id and predicted start/end of the answer
+    for question_id, doc_index in zip(query_id, selected_doc_index):
+        char_answer_start = encoding.token_to_chars(doc_index, pred_token_start[doc_index]).start
+        char_answer_end = encoding.token_to_chars(doc_index, pred_token_end[doc_index]).end
+        # predicted answer is a substring of a document between start and end characters
+        pred_answers[question_id] = doc[doc_index][char_answer_start:char_answer_end]
+    return pred_answers, selected_doc_id
 
 
 def retriever_accuracy(similarity, query_id, doc_id, question_context, n):
@@ -624,94 +684,6 @@ def retriever_accuracy(similarity, query_id, doc_id, question_context, n):
         if native_doc_id not in retrieved_doc_id:
             err +=1
     return 1 - err / retrieved_doc_index.shape[0]
-
-
-def get_answer(model, query, query_id, doc, doc_id, tokenizer, batch_size, weights=None, max_lenght=512):
-
-    """
-
-    Get predicted answer to a query based on reader model
-
-    Args:
-        model: reader model instance
-        query (list): Input strings. Lenght [number of queries]
-        query_id (list): query ids. Lenght [number of queries]
-        doc (list): Input strings. Lenght [number of retrieved documents for all queries]
-        doc_id (list): document ids. Lenght [number of retrieved documents for all queries]
-        tokenizer: tokenizer instance for reader model
-        batch_size (int): number of examples in a batch during reader model inference stage
-        weights (ndarray): coefficients to correct probability of correct answer given by reader model.
-        Shape [number of queries, number of retrieved documents for each query]
-        max_lenght: number of tokens in encoded sequence
-
-    Returns:
-        pred_answers (dict): a dict with text answers
-        in format {query_id: answer text}. Lenght [number of queries]
-        selected_doc_id (list): a list with finally selected document ids for each query.
-        Lenght [number of queries]
-
-    """
-
-    # compute number of docs retrieved for each query
-    n = len(doc) // len(query)
-    # if weights aren't given consider they equal to 1
-    if type(weights) != np.ndarray:
-        weights = np.ones((len(query), n))
-    # expand queries to satisfy dimension.
-    # Query list has lenght [number of questions],
-    # but doc list lenght is [number of retrieved documents for all queries],
-    # i.e. [number of questions * n], n is number of docs retrieved for each query.
-    # so we need to duplicate each query n times
-    query_for_reader = [x for item in query for x in repeat(item, n)]
-    doc_for_reader = doc
-    doc_id_for_reader = doc_id
-    # tokenize data for reader model and create loader data object
-    encodings = (tokenizer(doc_for_reader, query_for_reader,
-                             truncation=True, padding=True, max_length = max_lenght, return_tensors = 'pt'))
-    dataset = SquadDataset(encodings)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    # go to inference
-    model.eval()
-    with torch.no_grad():
-        pred_token_start = np.empty(0, dtype=int)
-        pred_token_end = np.empty(0, dtype=int)
-        p_joint = np.empty(0, dtype=int)
-        for batch in tqdm.tqdm(loader):
-            input_ids = batch['input_ids'].cuda()
-            # get predictions
-            logp_start, logp_end = model(input_ids)
-            p_start, p_end = logp_start.exp(), logp_end.exp()
-            # get start and end indices based on predictions
-            # and joint probability that start and end predictions are correct
-            pred_token_start_batch, pred_token_end_batch, p_joint_batch = discretize(p_start, p_end, 100, False)
-            pred_token_start = np.concatenate((pred_token_start, pred_token_start_batch), axis=None)
-            pred_token_end = np.concatenate((pred_token_end, pred_token_end_batch), axis=None)
-            p_joint = np.concatenate((p_joint, p_joint_batch), axis=None)
-        pred_answers = {}
-        # p_joint has shape [total number of docs].
-        # Transform it in more convenient way: [number of queries, n].
-        # Each row in this matrix matches a query.
-        # Each value in a row is a model confidence to predict correct start/end of the answer
-        # for each of n retrieved documents (in columns)
-        model_answer_probability = np.reshape(p_joint, (-1, n))
-        # correct model probability with given weights
-        final_answer_probability = model_answer_probability * weights
-        # For each row select index of the document with the highest probability.
-        # Shape [number of queries, n]
-        selected_doc_index_by_query = np.argmax(final_answer_probability, axis=1)
-        # transform selected doc_id indices in the matrix to
-        # indices in original list doc_id
-        shift_by_query = np.arange(len(query), dtype=np.int32) * n
-        selected_doc_index = selected_doc_index_by_query + shift_by_query
-        # finally get doc_id from doc_id index
-        selected_doc_id = np.array(doc_id_for_reader)[selected_doc_index]
-        # look for a text answer for each question based on selected doc_id and predicted start/end of the answer
-        for question_id, doc_index in zip(query_id, selected_doc_index):
-            char_answer_start = encodings.token_to_chars(doc_index, pred_token_start[doc_index]).start
-            char_answer_end = encodings.token_to_chars(doc_index, pred_token_end[doc_index]).end
-            # predicted answer is a substring of a document between start and end characters
-            pred_answers[question_id] = doc_for_reader[doc_index][char_answer_start:char_answer_end]
-        return pred_answers, selected_doc_id 
     
 
 def epoch_time(start_time, end_time):
